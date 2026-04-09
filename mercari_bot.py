@@ -42,6 +42,11 @@ def fetch(search):
         prices = re.findall(r'"price":(\d+)', r.text)
         thumbs = re.findall(r'(https://static\.mercdn\.net/item/detail/orig/photos/[^"\'\\]+)', r.text)
 
-        items = [{"id": ids[i], "name": names[i] if i < len(names) else "Fendi Item",
-                  "price": prices[i] if i < len(prices) else "0",
-                  "thumb": thumbs[i] if i < len(thumbs) el
+       items = []
+        for i in range(min(len(ids), 30)):
+            items.append({
+                "id": ids[i],
+                "name": names[i] if i < len(names) else "Fendi Item",
+                "price": prices[i] if i < len(prices) else "0",
+                "thumb": thumbs[i] if i < len(thumbs) else "",
+            })
