@@ -1,108 +1,119 @@
-import asyncio
-import smtplib
-import time  
-from email.message import EmailMessage
-from mercapi import Mercapi
+import json, time, smtplib, logging, os
+from datetime import datetime
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from pathlib import Path
+import requests
 
-# --- CONFIGURATION ---
-CHECK_INTERVAL = 300  
-EMAIL_SENDER = "siyashahh13@gmail.com"
-EMAIL_PASSWORD = "tkqi xxgb qinu ottm"  
-EMAIL_RECEIVER = "siyashahh13@gmail.com"
+EMAIL_SENDER = os.environ.get("ALERT_EMAIL_FROM", "")
+EMAIL_PASSWORD = os.environ.get("ALERT_EMAIL_PASSWORD", "")
+EMAIL_RECIPIENT = os.environ.get("ALERT_EMAIL_TO", "")
+POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL_SECONDS", "300"))
+STATE_FILE = Path(__file__).parent / "seen.json"
 
-SEARCH_PARAMS = {
-    "query": "",
-    "categories": [208],
-    "brands": [1026]
-}
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+log = logging.getLogger(__name__)
 
-seen_item_ids = set()
+SEARCHES = [{"name": "Fendi Ladies Handbags", "category_id": 208, "brand_id": 1026}]
 
-async def send_email(item, item_id):
-    msg = EmailMessage()
-    msg.set_content(f"New item found!\n\nName: {item.name}\nPrice: {item.price}\nURL: https://jp.mercari.com/item/{item_id}")
-    msg['Subject'] = f"🔔 Mercari Alert: {item.name}"
-    msg['From'] = EMAIL_SENDER
-    msg['To'] = EMAIL_RECEIVER
-
+def load_seen():
     try:
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
-            smtp.login(EMAIL_SENDER, EMAIL_PASSWORD)
-            smtp.send_message(msg)
-        print(f"--> Notification sent for: {item.name}")
+        return json.loads(STATE_FILE.read_text())
+    except:
+        return {}
+
+def save_seen(data):
+    STATE_FILE.write_text(json.dumps(data))
+
+def fetch(search):
+    try:
+        r = requests.post("https://api.mercari.jp/v2/entities:search", json={
+            "userId": "", "pageToken": "",
+            "searchCondition": {
+                "keyword": "", "excludeKeyword": "",
+                "sort": "SORT_CREATED_TIME", "order": "ORDER_DESC",
+                "status": ["STATUS_SELLING"],
+                "categoryId": [search["category_id"]],
+                "brandId": [search["brand_id"]],
+                "sizeId": [], "priceMin": 0, "priceMax": 0,
+                "itemConditionId": [], "shippingPayerId": [],
+                "shippingFromArea": [], "shippingMethod": [],
+                "colorId": [], "hasCoupon": False,
+                "attributes": [], "thumbnailTypes": [], "itemTypes": [],
+            },
+            "defaultDatasets": [], "serviceFrom": "suruga",
+            "withItemBrand": True, "withItemSize": False,
+            "withItemThumbnail": True, "useDynamicAttribute": True,
+            "indexRouting": "INDEX_ROUTING_UNSPECIFIED",
+        }, headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json",
+            "X-Platform": "web",
+            "DPoP": "dummy",
+        }, timeout=15)
+        items = r.json().get("items", [])
+        log.info(f"[{search['name']}] Fetched {len(items)} items")
+        return items
     except Exception as e:
-        print(f"--> Failed to send email: {e}")
+        log.error(f"Fetch error: {e}")
+        return []
 
-async def poll_mercari():
-    global seen_item_ids 
-    
-    m = Mercapi()
-    
-    # Record start time (minus a 5-minute safety buffer for timezone weirdness)
-    bot_start_time = int(time.time()) - 300
-    
-    print("Starting Mercari monitor...")
-    print("STATUS: 'Birth Certificate' verification active. Hunting ghosts...")
-    
-    is_first_run = True
-    
+def send_email(subject, html):
+    if not EMAIL_PASSWORD:
+        log.warning("No email password — skipping")
+        return
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = EMAIL_SENDER
+        msg["To"] = EMAIL_RECIPIENT
+        msg.attach(MIMEText(html, "html"))
+        with smtplib.SMTP("smtp.gmail.com", 587) as s:
+            s.starttls()
+            s.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            s.sendmail(EMAIL_SENDER, EMAIL_RECIPIENT, msg.as_string())
+        log.info(f"Email sent: {subject}")
+    except Exception as e:
+        log.error(f"Email error: {e}")
+
+def make_html(name, items):
+    rows = ""
+    for item in items:
+        iid = item.get("id", "")
+        price = f"¥{int(item.get('price',0)):,}"
+        thumb = (item.get("thumbnails") or [""])[0]
+        img = f'<img src="{thumb}" width="70" height="70" style="border-radius:6px">' if thumb else "📦"
+        rows += f"""<tr>
+            <td style="padding:10px;border-bottom:1px solid #eee">{img}</td>
+            <td style="padding:10px;border-bottom:1px solid #eee">
+                <b>{item.get('name','')}</b><br>
+                <span style="color:#e03;font-size:16px">{price}</span><br><br>
+                <a href="https://jp.mercari.com/item/{iid}" style="background:#e03;color:#fff;padding:6px 12px;border-radius:4px;text-decoration:none">View →</a>
+            </td></tr>"""
+    return f"""<html><body style="font-family:sans-serif">
+        <h2 style="background:#e03;color:#fff;padding:16px">🛍️ {len(items)} new {name}</h2>
+        <table>{rows}</table></body></html>"""
+
+def run():
+    log.info("🚀 Mercari Monitor started")
     while True:
-        try:
-            results = await m.search(**SEARCH_PARAMS)
-            
-            for item in results.items:
-                # 1. Ignore obviously sold items
-                status_str = str(getattr(item, 'status', '')).upper()
-                if 'SOLD_OUT' in status_str or 'TRADING' in status_str:
-                    continue
-                    
-                item_id = getattr(item, 'id_', getattr(item, 'item_id', getattr(item, 'product_id', 'UNKNOWN_ID')))
-                if item_id == 'UNKNOWN_ID':
-                    continue 
-
-                if item_id not in seen_item_ids:
-                    seen_item_ids.add(item_id)
-                    
-                    if is_first_run:
-                        continue # Silently memorize the first page
-
-                    # --- THE BIRTH CERTIFICATE CHECK ---
-                    try:
-                        # Bot clicks the specific item to get the FULL hidden data
-                        full_item = await m.item(item_id)
-                        item_time = getattr(full_item, 'created', getattr(full_item, 'updated', 0))
-                        
-                        # Validate the time
-                        if isinstance(item_time, (int, float)) and item_time > 0:
-                            if item_time > 9999999999: 
-                                item_time = item_time / 1000
-                                
-                            if item_time < bot_start_time:
-                                print(f"[BLOCKED GHOST]: {item.name} (This is actually an old item)")
-                                continue 
-                        else:
-                            print(f"[BLOCKED]: Couldn't verify time for {item.name}. Skipping to be safe.")
-                            continue # FAIL CLOSED: If we don't know the time, trash it.
-
-                        # If it survives all checks, it's a true drop!
-                        print(f"*** TRUE NEW DROP ***: {item.name}")
-                        await send_email(full_item, item_id)
-                        
-                    except Exception as e:
-                        print(f"Error inspecting item {item_id}: {e}")
-                    
-                    # Be gentle on Mercari's servers so we don't get IP banned
-                    await asyncio.sleep(1)
-            
-            is_first_run = False
-            
-            if len(seen_item_ids) > 1000:
-                seen_item_ids = set(list(seen_item_ids)[-500:])
-
-        except Exception as e:
-            print(f"Error during poll: {e}")
-            
-        await asyncio.sleep(CHECK_INTERVAL)
+        seen = load_seen()
+        for s in SEARCHES:
+            key = s["name"]
+            known = set(seen.get(key, []))
+            items = fetch(s)
+            current = {i.get("id") for i in items}
+            new_ids = current - known
+            if new_ids and known:
+                new_items = [i for i in items if i.get("id") in new_ids]
+                log.info(f"🆕 {len(new_items)} new items!")
+                send_email(f"🛍️ {len(new_items)} new {key} on Mercari Japan", make_html(key, new_items))
+            elif not known:
+                log.info(f"First run — memorised {len(current)} listings")
+            seen[key] = list(current)
+        save_seen(seen)
+        log.info(f"Sleeping {POLL_INTERVAL}s...")
+        time.sleep(POLL_INTERVAL)
 
 if __name__ == "__main__":
-    asyncio.run(poll_mercari())
+    run()
