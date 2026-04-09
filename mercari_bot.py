@@ -27,31 +27,38 @@ def save_seen(data):
 
 def fetch(search):
     try:
-        r = requests.post("https://api.mercari.jp/v2/entities:search", json={
-            "userId": "", "pageToken": "",
-            "searchCondition": {
-                "keyword": "", "excludeKeyword": "",
-                "sort": "SORT_CREATED_TIME", "order": "ORDER_DESC",
-                "status": ["STATUS_SELLING"],
-                "categoryId": [search["category_id"]],
-                "brandId": [search["brand_id"]],
-                "sizeId": [], "priceMin": 0, "priceMax": 0,
-                "itemConditionId": [], "shippingPayerId": [],
-                "shippingFromArea": [], "shippingMethod": [],
-                "colorId": [], "hasCoupon": False,
-                "attributes": [], "thumbnailTypes": [], "itemTypes": [],
-            },
-            "defaultDatasets": [], "serviceFrom": "suruga",
-            "withItemBrand": True, "withItemSize": False,
-            "withItemThumbnail": True, "useDynamicAttribute": True,
-            "indexRouting": "INDEX_ROUTING_UNSPECIFIED",
-        }, headers={
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json",
-            "X-Platform": "web",
-            "DPoP": "dummy",
-        }, timeout=15)
-        items = r.json().get("items", [])
+        url = "https://jp.mercari.com/search"
+        params = {
+            "category_id": search["category_id"],
+            "brand_id": search["brand_id"],
+            "sort": "created_time",
+            "order": "desc",
+            "status": "on_sale",
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "ja-JP,ja;q=0.9",
+            "Referer": "https://jp.mercari.com/",
+        }
+        r = requests.get(url, params=params, headers=headers, timeout=15)
+        
+        # Parse item IDs from the page HTML
+        import re
+        ids = re.findall(r'"id":"(m\d+)"', r.text)
+        names = re.findall(r'"name":"([^"]{5,80})"', r.text)
+        prices = re.findall(r'"price":(\d+)', r.text)
+        thumbs = re.findall(r'"(https://static\.mercdn\.net/item/detail/orig/photos/[^"]+)"', r.text)
+        
+        items = []
+        for i, iid in enumerate(ids[:30]):
+            items.append({
+                "id": iid,
+                "name": names[i] if i < len(names) else "Fendi Item",
+                "price": prices[i] if i < len(prices) else "0",
+                "thumb": thumbs[i] if i < len(thumbs) else "",
+            })
+        
         log.info(f"[{search['name']}] Fetched {len(items)} items")
         return items
     except Exception as e:
@@ -60,7 +67,7 @@ def fetch(search):
 
 def send_email(subject, html):
     if not EMAIL_PASSWORD:
-        log.warning("No email password — skipping")
+        log.warning("No email password set")
         return
     try:
         msg = MIMEMultipart("alternative")
@@ -81,18 +88,21 @@ def make_html(name, items):
     for item in items:
         iid = item.get("id", "")
         price = f"¥{int(item.get('price',0)):,}"
-        thumb = (item.get("thumbnails") or [""])[0]
-        img = f'<img src="{thumb}" width="70" height="70" style="border-radius:6px">' if thumb else "📦"
+        thumb = item.get("thumb", "")
+        img = f'<img src="{thumb}" width="70" height="70" style="border-radius:6px;object-fit:cover">' if thumb else "📦"
         rows += f"""<tr>
-            <td style="padding:10px;border-bottom:1px solid #eee">{img}</td>
-            <td style="padding:10px;border-bottom:1px solid #eee">
+            <td style="padding:10px;border-bottom:1px solid #eee;vertical-align:top">{img}</td>
+            <td style="padding:10px;border-bottom:1px solid #eee;vertical-align:top">
                 <b>{item.get('name','')}</b><br>
-                <span style="color:#e03;font-size:16px">{price}</span><br><br>
-                <a href="https://jp.mercari.com/item/{iid}" style="background:#e03;color:#fff;padding:6px 12px;border-radius:4px;text-decoration:none">View →</a>
+                <span style="color:#e03;font-size:16px;font-weight:bold">{price}</span><br><br>
+                <a href="https://jp.mercari.com/item/{iid}" style="background:#e03;color:#fff;padding:6px 12px;border-radius:4px;text-decoration:none">View on Mercari →</a>
             </td></tr>"""
-    return f"""<html><body style="font-family:sans-serif">
-        <h2 style="background:#e03;color:#fff;padding:16px">🛍️ {len(items)} new {name}</h2>
-        <table>{rows}</table></body></html>"""
+    return f"""<html><body style="font-family:sans-serif;margin:0;padding:20px;background:#f5f5f5">
+        <div style="max-width:600px;margin:0 auto;background:white;border-radius:10px;overflow:hidden">
+        <div style="background:#e03;padding:20px"><h2 style="color:white;margin:0">🛍️ {len(items)} new {name} on Mercari Japan</h2></div>
+        <table style="width:100%;border-collapse:collapse">{rows}</table>
+        <div style="padding:12px;text-align:center;color:#aaa;font-size:12px">Checks every {POLL_INTERVAL//60} minutes</div>
+        </div></body></html>"""
 
 def run():
     log.info("🚀 Mercari Monitor started")
